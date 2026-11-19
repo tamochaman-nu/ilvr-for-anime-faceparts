@@ -1,0 +1,23 @@
+--- a/resizer.py	2026-11-18 21:14:15.947001434 +0900
++++ b/resizer.py	2026-11-18 21:14:15.955089757 +0900
+@@ -141,8 +141,7 @@
+         # Determine a set of field_of_view for each each output position, these are the pixels in the input image
+         # that the pixel in the output image 'sees'. We get a matrix whos horizontal dim is the output pixels (big) and the
+         # vertical dim is the pixels it 'sees' (kernel_size + 2)
+-        field_of_view = np.squeeze(
+-            np.int16(np.expand_dims(left_boundary, axis=1) + np.arange(expanded_kernel_width) - 1))
++        field_of_view = np.int16(np.expand_dims(left_boundary, axis=1) + np.arange(expanded_kernel_width) - 1)
+ 
+         # Assign weight to each pixel in the field of view. A matrix whos horizontal dim is the output pixels and the
+         # vertical dim is a list of weights matching to the pixel in the field of view (that are specified in
+@@ -160,8 +159,8 @@
+ 
+         # Get rid of  weights and pixel positions that are of zero weight
+         non_zero_out_pixels = np.nonzero(np.any(weights, axis=0))
+-        weights = np.squeeze(weights[:, non_zero_out_pixels])
+-        field_of_view = np.squeeze(field_of_view[:, non_zero_out_pixels])
++        weights = weights[:, non_zero_out_pixels[0]]
++        field_of_view = field_of_view[:, non_zero_out_pixels[0]]
+ 
+         # Final products are the relative positions and the matching weights, both are output_size X fixed_kernel_size
+         return weights, field_of_view

@@ -1,0 +1,7 @@
+__pycache__/
+.env
+.cache/
+*.pt
+models/
+data/
+outputs/

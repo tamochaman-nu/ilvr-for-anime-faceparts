@@ -1,0 +1,146 @@
+# アニメ目DDPM × ILVR の実行環境。
+#
+#   docker compose build
+#   docker compose run --rm shell            # 対話シェル
+#   docker compose run --rm check-compat     # Phase 1: ILVR 公式実装の流用可否の判定
+#   docker compose run --rm verify-ilvr      # 自作 ILVR ループの検証 (間引きの対応付け・公式実装との一致)
+#   docker compose run --rm make-ref-lists   # 評価用の参照画像・KID 比較用のアニメ目のリストを lists/ に作る
+#   docker compose run --rm ilvr-eye         # 実写の目 -> アニメ調の目 (条件は環境変数で上書き:
+#                                            #   -e DOWN_N=16 -e RANGE_T=40 -e T_REF=t-1 -e SEEDS=0,1,2 など。
+#                                            #   一覧は scripts/run_ilvr_eye.sh)
+#   docker compose run --rm phase3           # Phase 3: down_N x range_t の総当たり・評価・グリッド (outputs/phase3)
+#   docker compose run --rm fit-color-stats  # Step 3: 色の写像に使う CIELAB の統計 (lists/color_stats.json)
+#   docker compose run --rm step3            # Step 3: 改善案の比較 (outputs/step3)
+#   docker compose run --rm eval-ilvr        # outputs/ の実行結果を評価して CSV にまとめる
+#                                            #   (-e RUN_DIRS="outputs/ilvr_eye/*" -e OUT_CSV=... で対象を指定)
+#
+# ホスト側のパス (データセット・チェックポイント) は .env で指定する (ひな形: .env.example)。
+# リポジトリは /app にバインドマウントされるので、コードを変えても再ビルドは不要。
+
+x-runtime-env: &runtime-env
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+  HOME: /tmp  # passwd に無い UID でもキャッシュ等を書けるように
+  # LPIPS / Inception (KID) の重みをリポジトリ内にキャッシュして、毎回ダウンロードしないようにする
+  TORCH_HOME: /app/.cache/torch
+
+x-common: &common
+  build:
+    context: .
+    args:
+      BASE_IMAGE: ${BASE_IMAGE:-pytorch/pytorch:2.4.1-cuda12.4-cudnn9-devel}
+  image: ilvr-anime-faceparts:${IMAGE_TAG:-latest}
+  # ホストのユーザーで実行し、出力が root 所有にならないようにする
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
+  working_dir: /app
+  environment:
+    <<: *runtime-env
+  volumes:
+    - ./:/app
+    # アニメ目の学習データ (C4 の統計比較、Phase 3 の KID)
+    - ${HOST_ANIME_EYE_DIR:-./data/anime_eye}:/data/anime_eye:ro
+    # 実写の目クロップ (ILVR の参照画像)
+    - ${HOST_REAL_EYE_DIR:-./data/real_eye}:/data/real_eye:ro
+    # 実写の目のマスク (マスク付き ILVR)
+    - ${HOST_REAL_EYE_MASK_DIR:-./data/real_eye_mask}:/data/real_eye_mask:ro
+  shm_size: '8gb'
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            device_ids: ['${GPU_ID:-0}']
+            capabilities: [gpu]
+
+services:
+  shell:
+    <<: *common
+    container_name: ilvr-anime-faceparts-shell
+    command: /bin/bash
+    stdin_open: true
+    tty: true
+
+  check-compat:
+    <<: *common
+    container_name: ilvr-anime-faceparts-check-compat
+    volumes:
+      - ./:/app
+      - ${HOST_ANIME_EYE_DIR:-./data/anime_eye}:/data/anime_eye:ro
+      # 比較対象の学習フォーク (tamochaman-nu/guided-diffusion, dev/detect-resblock-overflow)。読み取り専用
+      - ${HOST_FORK_DIR:-./third_party/guided-diffusion}:/fork:ro
+    command: >
+      python diagnostics/check_ilvr_compat.py --fork_root /fork
+      --model_path ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
+      --cfg ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
+      --data_dir /data/anime_eye --out_dir diagnostics/outputs/phase1
+
+  verify-ilvr:
+    <<: *common
+    container_name: ilvr-anime-faceparts-verify-ilvr
+    volumes:
+      - ./:/app
+      - ${HOST_REAL_EYE_DIR:-./data/real_eye}:/data/real_eye:ro
+      - ${HOST_FORK_DIR:-./third_party/guided-diffusion}:/fork:ro
+    command: >
+      python diagnostics/verify_ilvr_eye.py
+      --model_path ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
+      --cfg ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
+      --base_samples /data/real_eye --fork_root /fork
+
+  make-ref-lists:
+    <<: *common
+    container_name: ilvr-anime-faceparts-make-ref-lists
+    volumes:
+      - ./:/app
+      - ${HOST_ANIME_EYE_DIR:-./data/anime_eye}:/data/anime_eye:ro
+      - ${HOST_REAL_EYE_DIR:-./data/real_eye}:/data/real_eye:ro
+      # 実写の目の切り出し時のスコア (眼鏡・目の画素の割合・見え方・ヨー角) で参照画像を選別する
+      - ${HOST_REAL_EYE_PARTS_JSONL:-./data/real_eye_parts.jsonl}:/data/real_eye_parts.jsonl:ro
+    command: python scripts/make_ref_lists.py
+
+  fit-color-stats:
+    <<: *common
+    container_name: ilvr-anime-faceparts-fit-color-stats
+    volumes:
+      - ./:/app
+      - ${HOST_ANIME_EYE_DIR:-./data/anime_eye}:/data/anime_eye:ro
+      - ${HOST_REAL_EYE_DIR:-./data/real_eye}:/data/real_eye:ro
+      - ${HOST_REAL_EYE_PARTS_JSONL:-./data/real_eye_parts.jsonl}:/data/real_eye_parts.jsonl:ro
+    command: python scripts/fit_color_stats.py
+
+  step3:
+    <<: *common
+    container_name: ilvr-anime-faceparts-step3
+    environment:
+      <<: *runtime-env
+      MODEL_PATH: ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
+      MODEL_CFG: ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
+    command: /bin/bash scripts/run_step3.sh
+
+  eval-ilvr:
+    <<: *common
+    container_name: ilvr-anime-faceparts-eval-ilvr
+    environment:
+      <<: *runtime-env
+      RUN_DIRS: ${RUN_DIRS:-outputs/ilvr_eye/*}
+      OUT_CSV: ${OUT_CSV:-outputs/ilvr_eye/metrics.csv}
+    command: >
+      bash -c 'python scripts/eval_ilvr_eye.py --run_dirs "$$RUN_DIRS" --out_csv "$$OUT_CSV"
+      --anime_dir /data/anime_eye --anime_list lists/anime_eye_kidref10000.txt'
+
+  phase3:
+    <<: *common
+    container_name: ilvr-anime-faceparts-phase3
+    environment:
+      <<: *runtime-env
+      MODEL_PATH: ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
+      MODEL_CFG: ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
+    command: /bin/bash scripts/run_phase3.sh
+
+  ilvr-eye:
+    <<: *common
+    container_name: ilvr-anime-faceparts-ilvr-eye
+    environment:
+      <<: *runtime-env
+      MODEL_PATH: ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
+      MODEL_CFG: ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
+    command: /bin/bash scripts/run_ilvr_eye.sh

@@ -1,0 +1,29 @@
+{
+  "args": {
+    "real_dir": "/data/real_eye",
+    "real_parts_jsonl": "/data/real_eye_parts.jsonl",
+    "anime_dir": "/data/anime_eye",
+    "max_glasses": 0.05,
+    "min_eye_px": 0.5,
+    "min_vis": 0.9,
+    "max_abs_yaw": 30.0,
+    "num_eval": 1000,
+    "num_grid": 16,
+    "num_anime_ref": 10000,
+    "seed": 0,
+    "out_dir": "lists"
+  },
+  "num_real_images": 135428,
+  "num_kept": 93899,
+  "excluded_by_reason": {
+    "eye_px": 34329,
+    "vis": 1975,
+    "glasses": 24109,
+    "yaw": 8361
+  },
+  "lists": {
+    "real_eye_eval1000.txt": 1000,
+    "real_eye_grid16.txt": 16,
+    "anime_eye_kidref10000.txt": 10000
+  }
+}
