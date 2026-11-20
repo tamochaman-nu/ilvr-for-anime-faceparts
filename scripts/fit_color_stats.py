@@ -5,6 +5,8 @@
          評価用の参照画像 (real_eye_eval*.txt) を除いたものから num 枚
   anime  アニメ目の学習データ: KID の比較対象 (anime_eye_kidref*.txt) を除いたものから num 枚
 評価に使う画像を統計に含めないので、写像が評価用の画像に合わせ込まれることはない。
+--real_mask_dir / --anime_mask_dir を渡すと、マスクが 0.5 以上の画素 (マスク済みの画像では白い背景を除いた
+目の部分) だけで統計を求める。ディレクトリに {side} を含めると左右別のフォルダから読む (ilvr_eye.image_path)。
 
 使い方: docker compose run --rm fit-color-stats
 """
@@ -16,8 +18,8 @@ import random
 
 import torch as th
 
-from guided_diffusion.ilvr_eye import list_images, load_image
-from guided_diffusion.ilvr_ref_transform import lab_stats
+from guided_diffusion.ilvr_eye import image_path, list_images, load_image
+from guided_diffusion.ilvr_ref_transform import lab_stats, load_masks
 
 
 def read_list(path):
@@ -45,6 +47,8 @@ def main():
     p.add_argument("--real_dir", default="/data/real_eye")
     p.add_argument("--real_parts_jsonl", default="/data/real_eye_parts.jsonl")
     p.add_argument("--anime_dir", default="/data/anime_eye")
+    p.add_argument("--real_mask_dir", default="")
+    p.add_argument("--anime_mask_dir", default="")
     p.add_argument("--ref_lists_json", default="lists/ref_lists.json")
     p.add_argument("--eval_list", default="lists/real_eye_eval1000.txt")
     p.add_argument("--anime_list", default="lists/anime_eye_kidref10000.txt")
@@ -59,10 +63,12 @@ def main():
     anime_pool = sorted(set(list_images(args.anime_dir)) - set(read_list(args.anime_list)))
     rng = random.Random(args.seed)
     out = {"args": vars(args), "selection": sel}
-    for key, d, pool in (("real", args.real_dir, real_pool), ("anime", args.anime_dir, anime_pool)):
+    for key, d, md, pool in (("real", args.real_dir, args.real_mask_dir, real_pool),
+                             ("anime", args.anime_dir, args.anime_mask_dir, anime_pool)):
         names = rng.sample(pool, min(args.num, len(pool)))
-        x = th.stack([load_image(os.path.join(d, n), 32) for n in names])
-        out[key] = {"num": len(names), "pool": len(pool), **lab_stats(x)}
+        x = th.stack([load_image(image_path(d, n), 32) for n in names])
+        masks = load_masks(md, names, 32) if md else None
+        out[key] = {"num": len(names), "pool": len(pool), **lab_stats(x, masks)}
         print(f"{key}: {len(names)} / {len(pool)} 枚, L*a*b* 平均 {[round(v, 2) for v in out[key]['mean']]}, "
               f"標準偏差 {[round(v, 2) for v in out[key]['std']]}")
     with open(args.out, "w") as f:

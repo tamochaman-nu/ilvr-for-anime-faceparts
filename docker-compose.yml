@@ -11,6 +11,7 @@
 #   docker compose run --rm phase3           # Phase 3: down_N x range_t の総当たり・評価・グリッド (outputs/phase3)
 #   docker compose run --rm fit-color-stats  # Step 3: 色の写像に使う CIELAB の統計 (lists/color_stats.json)
 #   docker compose run --rm step3            # Step 3: 改善案の比較 (outputs/step3)
+#   docker compose run --rm lr-masked        # 左右別の目DDPM x マスク済みの目で、比較資料の条件を実行 (outputs/lr_masked)
 #   docker compose run --rm eval-ilvr        # outputs/ の実行結果を評価して CSV にまとめる
 #                                            #   (-e RUN_DIRS="outputs/ilvr_eye/*" -e OUT_CSV=... で対象を指定)
 #
@@ -42,6 +43,11 @@ x-common: &common
     - ${HOST_REAL_EYE_DIR:-./data/real_eye}:/data/real_eye:ro
     # 実写の目のマスク (マスク付き ILVR)
     - ${HOST_REAL_EYE_MASK_DIR:-./data/real_eye_mask}:/data/real_eye_mask:ro
+    # 左右別に切り出したパーツ (eye_l_masked/<元の名前>.png など。左右別の目DDPM)
+    - ${HOST_REAL_EYE_SPLIT_DIR:-./data/real_eye_split}:/data/real_eye_split:ro
+    - ${HOST_ANIME_EYE_SPLIT_DIR:-./data/anime_eye_split}:/data/anime_eye_split:ro
+    # 実写の目の切り出し時のスコア (参照画像の選別条件。色の写像の統計を求めるときにも使う)
+    - ${HOST_REAL_EYE_PARTS_JSONL:-./data/real_eye_parts.jsonl}:/data/real_eye_parts.jsonl:ro
   shm_size: '8gb'
   deploy:
     resources:
@@ -115,6 +121,16 @@ services:
       MODEL_PATH: ${MODEL_PATH:-ddpm/anime-eye32-mp64-ema_0.9999_200000.pt}
       MODEL_CFG: ${MODEL_CFG:-ddpm/anime-eye32-mp64.cfg}
     command: /bin/bash scripts/run_step3.sh
+
+  lr-masked:
+    <<: *common
+    container_name: ilvr-anime-faceparts-lr-masked
+    environment:
+      <<: *runtime-env
+      MODEL_PATH_L: ${MODEL_PATH_L:-ddpm/anime-eye32-mp64-left-ema_0.9999_200000.pt}
+      MODEL_PATH_R: ${MODEL_PATH_R:-ddpm/anime-eye32-mp64-right-ema_0.9999_200000.pt}
+      MODEL_CFG: ${MODEL_CFG_LR:-ddpm/train.cfg}
+    command: /bin/bash scripts/run_lr_masked.sh
 
   eval-ilvr:
     <<: *common

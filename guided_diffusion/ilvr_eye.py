@@ -224,8 +224,37 @@ def ilvr_sample(diffusion, model, ref, resizers, range_t=0, t_ref="t", noise=Non
     return img
 
 
+SIDES = ("l", "r")
+
+
+def image_path(data_dir, name):
+    """
+    画像名 (<元の名前>_l.png のような、パーツ切り出しの既定の並べ方の名前) からパスを作る。data_dir に {side} を
+    含めると、目を左右別のフォルダに書く並べ方 (crop_parts.py --split_eye_sides: eye_l_masked/<元の名前>.png)
+    として解決する。例: /data/real_eye_split/eye_{side}_masked
+    """
+    if "{side}" not in data_dir:
+        return os.path.join(data_dir, name)
+    stem, ext = os.path.splitext(name)
+    assert stem[-2:] in ("_l", "_r"), f"{name}: 左右別の並べ方には <元の名前>_l / _r の名前が要る"
+    return os.path.join(data_dir.format(side=stem[-1]), stem[:-2] + ext)
+
+
 def list_images(data_dir):
-    return sorted(f for f in os.listdir(data_dir) if f.lower().endswith((".png", ".jpg", ".jpeg")))
+    """data_dir の画像名の一覧。{side} を含む場合は左右のフォルダをまとめて、<元の名前>_l.png の形の名前で返す。"""
+    def ls(d):
+        return [f for f in os.listdir(d) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+
+    if "{side}" not in data_dir:
+        return sorted(ls(data_dir))
+    return sorted(f"{os.path.splitext(f)[0]}_{s}{os.path.splitext(f)[1]}" for s in SIDES
+                  for f in ls(data_dir.format(side=s)))
+
+
+def ref_side(name):
+    """画像名 <元の名前>_l.png / _r.png の左右 (画像の左側の目が l)。"""
+    stem = os.path.splitext(name)[0]
+    return stem[-1] if stem[-2:] in ("_l", "_r") else None
 
 
 def select_refs(data_dir, num_refs, seed=0, balance_lr=True, candidates=None):

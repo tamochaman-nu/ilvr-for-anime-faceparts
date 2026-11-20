@@ -7,8 +7,9 @@ scripts/ilvr_sample_eye.py の実行結果 (run.json のあるディレクトリ
     アニメらしさ: saturation / laplacian_var / luminance)。サンプルごとの値は <run_dir>/per_sample.csv
   - KID: 全シードの出力をまとめたもの (kid, kid_std はサブセット間の標準偏差) と、シードごとの KID の平均と標準偏差
   - seed_mad: 同じ参照画像のシード違いの出力どうしの平均絶対差 (多様性)
-  - 参照画像の色を写した実行 (run.json の outputs に cond_png がある) では、対応の指標を加工前の参照画像
-    (refs/) と比べたものに加えて、モデルに渡した参照画像 (refs_cond/) と比べたものを <指標>_cond として出す
+  - 参照画像を加工した実行 (色の写像・代理画像。run.json の outputs に cond_png がある) では、対応の指標を
+    加工前の参照画像 (refs/) と比べたものに加えて、モデルに渡した参照画像 (refs_cond/) と比べたものを
+    <指標>_cond として出す
 加えて、比較の基準として次の行を出す:
   - ref_images: 参照画像 (実写の目) そのもの。KID の上限の目安 (アニメにまったく寄せない場合)
   - anime_holdout: KID の比較対象に含めていないアニメ目の学習データ。KID の下限の目安 (同じ分布)
@@ -23,12 +24,13 @@ import glob
 import json
 import os
 import random
+import zlib
 from collections import defaultdict
 
 import numpy as np
 import torch as th
 
-from guided_diffusion.ilvr_eye import list_images, load_image
+from guided_diffusion.ilvr_eye import image_path, list_images, load_image
 from guided_diffusion.ilvr_metrics import (
     LPIPS,
     InceptionFeatures,
@@ -73,8 +75,14 @@ def anime_features(args, inception):
     """KID の比較対象 (anime_list) と、それに含まれない holdout の特徴。キャッシュする。"""
     with open(args.anime_list) as f:
         ref_names = [line.strip() for line in f if line.strip()]
+    # キャッシュ名に anime_dir を含める (マスク済み・左右別など、同じリストで別のデータを使う場合に取り違えない)
+    dir_key = zlib.crc32(args.anime_dir.encode()) & 0xFFFFFFFF
     cache = os.path.join(args.cache_dir, f"inception_{os.path.splitext(os.path.basename(args.anime_list))[0]}"
-                                         f"_holdout{args.num_holdout}.pt")
+                                         f"_holdout{args.num_holdout}_{dir_key:08x}.pt")
+    legacy = os.path.join(args.cache_dir, f"inception_{os.path.splitext(os.path.basename(args.anime_list))[0]}"
+                                          f"_holdout{args.num_holdout}.pt")
+    if args.anime_dir == "/data/anime_eye" and not os.path.exists(cache) and os.path.exists(legacy):
+        cache = legacy  # ハッシュを含める前に /data/anime_eye で作ったキャッシュ
     if os.path.exists(cache):
         return th.load(cache)
     in_ref = set(ref_names)
@@ -82,7 +90,7 @@ def anime_features(args, inception):
                                              args.num_holdout))
     feats = {}
     for key, names in (("ref", ref_names), ("holdout", holdout)):
-        x = load_stack([os.path.join(args.anime_dir, n) for n in names])
+        x = load_stack([image_path(args.anime_dir, n) for n in names])
         feats[key] = inception(x)
         feats[f"{key}_style"] = style_only(x)
     os.makedirs(args.cache_dir, exist_ok=True)
@@ -99,7 +107,8 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--run_dirs", required=True, help="run.json のあるディレクトリ (カンマ区切り・glob 可)")
     p.add_argument("--out_csv", required=True)
-    p.add_argument("--anime_dir", default="/data/anime_eye")
+    p.add_argument("--anime_dir", default="/data/anime_eye",
+                   help="{side} を含めると左右別のフォルダから読む (例: /data/anime_eye_split/eye_{side}_masked)")
     p.add_argument("--anime_list", default="lists/anime_eye_kidref10000.txt")
     p.add_argument("--num_holdout", type=int, default=3000)
     p.add_argument("--kid_subset_size", type=int, default=1000)
@@ -160,12 +169,14 @@ def main():
                 for k, a in enumerate(idx) for b in idx[k + 1:]]
 
         a = run["args"]
-        row = {"run": os.path.relpath(d), "model": os.path.basename(run["model_path"]),
+        row = {"run": os.path.relpath(d), "model": "+".join(os.path.basename(p) for p in run["model_path"].split("+")),
                "down_N": a["down_N"], "down_size": a.get("down_size", 0), "range_t": a["range_t"],
                "t_ref": a["t_ref"], "resizer": a["resizer"],
                "color_transfer": a.get("color_transfer", "none"), "color_strength": a.get("color_strength", ""),
                "mask": "eye_mask" if a.get("mask_dir") else "", "mask_dilate": a.get("mask_dilate", ""),
                "mask_mode": a.get("mask_mode", "") if a.get("mask_dir") else "",
+               "proxy": a.get("proxy", "none"),
+               "proxy_blend": a.get("proxy_blend", "") if a.get("proxy", "none") != "none" else "",
                "timestep_respacing": a["timestep_respacing"], "n_refs": len(by_ref), "seeds": len(seeds),
                "n_samples": len(outs), **{k: float(m[k].mean()) for k in pair_keys + STYLE_KEYS},
                **kid_row(feats, anime["ref"], args),

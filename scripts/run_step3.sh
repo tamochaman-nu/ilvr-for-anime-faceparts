@@ -4,6 +4,9 @@
 #   b. マスク付き ILVR (composite): N ∈ {4,8} (range_t=40) x 膨張 {0,3} 画素 x 色の写像 {なし, lab_meanstd}
 #      比較用に、補正量にマスクを掛けるだけの multiply (発散する) を N8 で 1 条件
 #   c. 中間の縮小サイズ: 6x6 / 3x3 (range_t=40) x 色の写像 {なし, lab_meanstd}
+#   d. 色の写像の変形: 3x3 / N8 (range_t=40) x {lab_meanstd_l (a*b* の標準偏差を広げない), lab_mean (平均だけ)}
+#   e. 代理画像 (アニメの目の形の図形。色は lab_meanstd_l で写した参照画像から): N4 / 6x6 / 3x3 (range_t=40)
+#      x 実写との混合比 {1.0, 0.5}
 # 比較の基準 (Phase 3 の N{4,8,16}_rt40 と uncond) は outputs/phase3 から評価に加える。
 # 先に docker compose run --rm fit-color-stats で lists/color_stats.json を作っておく。
 # 使い方: docker compose run --rm step3   (環境変数 SEEDS, OUT_ROOT, MODEL_PATH などで上書きできる)
@@ -49,6 +52,20 @@ for S in 6 3; do
   sample "S${S}_rt${RT}" --down_size "$S"
   sample "S${S}_rt${RT}_lab_meanstd" --down_size "$S" --color_transfer lab_meanstd
 done
+# d. 色の写像の変形
+for CT in lab_meanstd_l lab_mean; do
+  sample "S3_rt${RT}_${CT}" --down_size 3 --color_transfer "$CT"
+  sample "N8_rt${RT}_${CT}" --down_N 8 --color_transfer "$CT"
+done
+# e. 代理画像
+for B in 1.0 0.5; do
+  sample "N4_rt${RT}_proxy${B}" --down_N 4 --color_transfer lab_meanstd_l --proxy ellipse \
+    --proxy_mask_dir "$MASK_DIR" --proxy_blend "$B"
+  for S in 6 3; do
+    sample "S${S}_rt${RT}_proxy${B}" --down_size "$S" --color_transfer lab_meanstd_l --proxy ellipse \
+      --proxy_mask_dir "$MASK_DIR" --proxy_blend "$B"
+  done
+done
 
 base="$PHASE3_ROOT/uncond,$PHASE3_ROOT/N4_rt40,$PHASE3_ROOT/N8_rt40,$PHASE3_ROOT/N16_rt40"
 python scripts/eval_ilvr_eye.py --run_dirs "$base,$OUT_ROOT/*" --out_csv "$OUT_ROOT/metrics.csv" \
@@ -74,3 +91,15 @@ done
 runs="$runs,N8 mask0 multiply=$OUT_ROOT/N8_rt40_mask0_multiply"
 grid grid_b_mask.png "$runs"
 grid grid_c_size.png "N4 (8x8)=$PHASE3_ROOT/N4_rt40,S6=$OUT_ROOT/S6_rt40,S6 ms=$OUT_ROOT/S6_rt40_lab_meanstd,N8 (4x4)=$PHASE3_ROOT/N8_rt40,S3=$OUT_ROOT/S3_rt40,S3 ms=$OUT_ROOT/S3_rt40_lab_meanstd,N16 (2x2)=$PHASE3_ROOT/N16_rt40"
+runs=""
+for R in S3 N8; do
+  runs="${runs:+$runs,}$R meanstd=$OUT_ROOT/${R}_rt40_lab_meanstd,$R meanstd_l=$OUT_ROOT/${R}_rt40_lab_meanstd_l"
+  runs="$runs,$R mean=$OUT_ROOT/${R}_rt40_lab_mean"
+done
+grid grid_d_color2.png "$runs"
+runs=""
+for R in N4 S6 S3; do
+  [ "$R" = N4 ] && base_run="$PHASE3_ROOT/N4_rt40" || base_run="$OUT_ROOT/${R}_rt40"
+  runs="${runs:+$runs,}$R=$base_run,$R proxy1.0=$OUT_ROOT/${R}_rt40_proxy1.0,$R proxy0.5=$OUT_ROOT/${R}_rt40_proxy0.5"
+done
+grid grid_e_proxy.png "$runs"

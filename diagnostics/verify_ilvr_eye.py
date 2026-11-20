@@ -21,6 +21,8 @@ ILVR の自作ループ (guided_diffusion/ilvr_eye.py) の検証。
        冪等性の誤差 (2 回かけたときの変化) が down_N=8 と同程度 (1.5 倍以内。公式の Resizer は 3 次補間なので
        整数倍でも厳密な射影ではなく、down_N=8 でも最大 0.1〜0.2 程度の誤差がある)
      - 色の写像: strength=0 なら恒等写像 (CIELAB との往復の誤差の範囲)
+  V8 代理画像 (ilvr_proxy.py): blend=0 なら参照画像がそのまま (従来の方式と同じ) で、楕円の推定 (マスクの
+     モーメント) が合成した楕円の半径・傾きを復元する
 
 使い方: docker compose run --rm verify-ilvr
 """
@@ -275,6 +277,32 @@ def check_v7(cfg, model, refs, names, device, color_stats="lists/color_stats.jso
     return r
 
 
+def check_v8(refs):
+    from guided_diffusion.ilvr_proxy import ellipse_from_mask, make_proxies
+
+    r = {}
+    # 合成した楕円 (32px の 8 倍の格子で描いて平均で縮小し、縁を滑らかにしたもの)
+    errs = []
+    for cx, cy, a, b, deg in [(15.5, 15.5, 10.0, 5.0, 0.0), (14.0, 17.0, 11.0, 4.5, 12.0), (16.5, 15.0, 9.0, 6.0, -20.0)]:
+        S = 8
+        Y, X = np.mgrid[:32 * S, :32 * S] / S + (0.5 / S - 0.5)
+        t = np.radians(deg)
+        u, v = (X - cx) * np.cos(t) + (Y - cy) * np.sin(t), -(X - cx) * np.sin(t) + (Y - cy) * np.cos(t)
+        m = ((u / a) ** 2 + (v / b) ** 2 <= 1).astype(np.float64).reshape(32, S, 32, S).mean((1, 3))
+        ecx, ecy, ea, eb, et = ellipse_from_mask(m)
+        errs.append(max(abs(ecx - cx), abs(ecy - cy), abs(ea - a), abs(eb - b), abs(np.degrees(et) - deg)))
+    r["ellipse_max_err"] = float(max(errs))  # 画素 (位置・半径) と度 (傾き) の最大
+    x = refs.cpu()
+    m = th.zeros(len(x), 1, 32, 32)
+    m[:, :, 12:20, 6:26] = 1
+    p0, _ = make_proxies(x, m, blend=0.0)
+    p1, _ = make_proxies(x, m, blend=1.0)
+    r["blend0_max_abs_diff"] = (p0 - x).abs().max().item()
+    r["blend1_differs"] = (p1 - x).abs().mean().item()
+    r["passed"] = r["ellipse_max_err"] < 0.5 and r["blend0_max_abs_diff"] == 0.0 and r["blend1_differs"] > 0.05
+    return r
+
+
 def save_grid(rows, path, scale=4):
     """rows: [[3 x H x W] in [-1, 1], ...] のリストのリスト"""
     from PIL import Image
@@ -320,13 +348,14 @@ def main():
     report["V5"] = check_v5(args.device)
     report["V6"] = check_v6(cfg, model, refs, names, args.device)
     report["V7"] = check_v7(cfg, model, refs, names, args.device)
+    report["V8"] = check_v8(refs)
 
     # 行: 参照画像 / 無条件生成 / ILVR (t, Resizer) / (t, interpolate) / (t-1, Resizer) / (t-1, interpolate)
     save_grid([list(refs), list(x_uncond)] + [list(xs[k]) for k in
               [("t", "resizer"), ("t", "interpolate"), ("t-1", "resizer"), ("t-1", "interpolate")]],
               os.path.join(args.out_dir, "v3_grid.png"))
 
-    keys = ("V1", "V2", "V3", "V4", "V5", "V6", "V7")
+    keys = ("V1", "V2", "V3", "V4", "V5", "V6", "V7", "V8")
     report["summary"] = {k: report[k]["passed"] for k in keys if k in report}
     with open(os.path.join(args.out_dir, "verify_ilvr_eye.json"), "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
