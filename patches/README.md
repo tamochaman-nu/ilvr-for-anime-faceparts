@@ -1,6 +1,12 @@
 # ILVR 公式実装 (jychoi118/ilvr_adm) からの変更の記録
 
-公式実装の既存ファイルは変更していない。目DDPM 用の処理はすべて新規ファイルで追加している。
+公式実装の既存ファイルの変更は、下の「既存ファイルの変更」に挙げた 1 か所だけ。目DDPM 用の処理はすべて新規ファイルで追加している。
+
+## 既存ファイルの変更
+
+| ファイル | diff | 内容 |
+|---|---|---|
+| `guided_diffusion/gaussian_diffusion.py` | [`gaussian-diffusion-cosine-shift.diff`](gaussian-diffusion-cosine-shift.diff) | `get_named_beta_schedule` に `cosine_shift<k>` (shifted cosine) を追加。学習フォーク [tamochaman-nu/guided-diffusion](https://github.com/tamochaman-nu/guided-diffusion) の `main` (`e5dde28`) の同名ファイルの同じ分岐をそのまま写した (出典のコメント 2 行だけ追加)。256x256 の顔 DDPM (`ddpm/anime-face256-mp128.cfg`、`NOISE_SCHEDULE=cosine_shift4`) に要る。beta の値は学習フォークと完全に一致し、既存の `linear` / `cosine` は変わらない。`unet_mp.py` はこの関数で timestep から log(sigma) を求めるので、モデルにも反映される |
 
 ## 追加したファイル
 
@@ -15,9 +21,15 @@
 | `scripts/make_ref_lists.py`, `lists/` | 参照画像の選別 (眼鏡・閉じた目・隠れた目・横向きを除く) と、評価・グリッド・KID 用のリスト |
 | `scripts/eval_ilvr_eye.py`, `scripts/make_ilvr_grid.py` | 実行結果の評価 (CSV) とグリッド画像 |
 | `scripts/run_phase3.sh`, `scripts/run_step3.sh` | Phase 3 (down_N x range_t) と Step 3 (改善案) の一括実行 |
+| `guided_diffusion/ilvr_proxy.py` | アニメの目の形をした代理画像 (Step 3 の改善案 2) |
+| `scripts/run_lr_masked.sh` | 左右別の目DDPM とマスク済みの目での比較の一括実行 |
+| `guided_diffusion/sdedit.py`, `scripts/sdedit_sample.py` | SDEdit・ILVR・マスク合成 (`--use_mask`, `--blend_mask_dir`)・色の補正を CLI で個別にオン・オフする変換 (オフなら現行 ILVR と一致) |
+| `ddpm/anime-face256-mp128.cfg` | 256x256 のアニメ顔 DDPM (MPUNetModel, 128ch) の設定。学習時の train.cfg が無いので、学習フォークの起動設定から根拠の行番号つきで写した |
 | `diagnostics/dataset_lowfreq.py` | アニメと実写の目の低周波の統計の比較 |
 | `diagnostics/check_ilvr_compat.py` | Phase 1 の流用可否の判定 |
 | `diagnostics/verify_ilvr_eye.py` | 自作 ILVR ループの検証 (間引きの対応付け、公式の p_sample_loop との一致、Step 3 の追加機能) |
+| `diagnostics/verify_sdedit.py` | 上の SDEdit の変換の動作確認 (回帰・SDEdit 単体・組み合わせ・シード固定) |
+| `diagnostics/ilvr_stability.py` | 顔全体の ILVR の不安定さの計測 (シード間のばらつき、入力のずれへの敏感さ)。(前回の計測で追加) |
 | `Dockerfile`, `docker-compose.yml`, `.env.example`, `.gitignore` | 実行環境 |
 
 ## 公式実装との違い (既存ファイルを変えずに対応したもの)
