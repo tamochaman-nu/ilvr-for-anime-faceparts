@@ -17,6 +17,7 @@ docker compose run --rm -e DOWN_N=16 -e RANGE_T=40 -e SEEDS=0,1,2 \
 docker compose run --rm phase3             # Phase 3 の総当たり・評価・グリッド (outputs/phase3/)
 docker compose run --rm fit-color-stats    # Step 3: 色の写像の統計 (lists/color_stats.json)
 docker compose run --rm step3              # Step 3: 改善案の比較 (outputs/step3/)
+docker compose run --rm lr-masked          # 左右別の目DDPM x マスク済みの目で比較資料の条件 (outputs/lr_masked/)
 docker compose run --rm eval-ilvr          # 任意の実行結果の評価 (-e RUN_DIRS=... -e OUT_CSV=...)
 # 推奨設定での変換 (6 節): 色の写像 + 縮小 3x3
 docker compose run --rm -e COLOR_TRANSFER=lab_meanstd -e DOWN_SIZE=3 -e RANGE_T=40 ilvr-eye
@@ -248,7 +249,27 @@ VRAM のピークは約 1.8 GB で、条件によらずほぼ同じ。
    - **多様性の懸念は当たっている**: N4 + 代理画像 1.0 は、シードを変えても構図が同じ (中央の目・一様な肌・
      髪なし) で、seed_mad も下がる (0.139、N4 0.155、S3 + meanstd_l 0.267)。0.5 では背景に髪などが戻る。
 
-## 7. 今後の改善
+## 7. 左右別の目DDPM とマスク済みの目 (2026-11-20)
+
+左右の目を別々に学習した `anime-eye32-mp64-left` / `-right` (設定は `ddpm/train.cfg`。`anime-eye32-mp64.cfg` と
+同一: IMAGE_SIZE=32 (1 行目)、LEARN_SIGMA=True (9 行目)、DIFFUSION_STEPS=1000 (23 行目)、NOISE_SCHEDULE=cosine
+(24 行目)) と、ランドマークの楕円の外を白で埋めたマスク済みの目 (`crop_parts.py --split_eye_sides` の
+`eye_{l,r}_masked/`) で、代理画像の有無の比較をやり直した (`scripts/run_lr_masked.sh`)。
+
+- 参照画像の名前 (`<元の名前>_l.png`、画像の左側の目が l) に応じて left / right のモデルを使い分ける
+  (`--model_path_l` / `--model_path_r`)。左右別のフォルダは `{side}` を含むパスで読む (`ilvr_eye.image_path`)。
+  参照画像の名前と乱数は Phase 3 / Step 3 と同じ。
+- 色の写像の統計は白い背景を除いた目の部分だけで求め (`lists/color_stats_masked.json`)、写像も目の部分だけに
+  適用する (`--color_mask_dir`)。
+- KID の比較対象は、マスク済みのアニメの目 (左右別) の `lists/anime_eye_kidref10000.txt` の画像。比較対象が
+  違うので、KID の値は 5・6 節とは直接比べられない。
+
+結果と所見は `docs/20261119_proxy_comparison/proxy_comparison.md` (git 管理外) にまとめた。要点:
+眼鏡・前髪の誤生成はマスクでどの条件でも消える。N8 より粗い縮小では目の輪郭が丸や不定形に崩れる。
+KID の最小は S3 + 色の写像 (0.005)。N4 + 代理画像は目の形を保ち、目として読める割合が最も高い (約 46/48)。
+色の写像と代理画像では、目の部分の彩度がアニメより低くなる (0.13〜0.17、アニメ 0.24)。
+
+## 8. 今後の改善
 
 Step 3 で試した案 (色の写像・マスク付き ILVR・中間の縮小サイズ) は 6 節。残りの候補:
 
