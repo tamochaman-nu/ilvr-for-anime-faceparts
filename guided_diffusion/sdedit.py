@@ -48,10 +48,12 @@ def stop_ratio_to_range_t(ilvr_stop_ratio, num_timesteps):
 
 
 def sdedit_ilvr_sample(diffusion, model, x0, resizers=None, range_t=0, t_ref="t", rng=None, t0=None,
-                       x_init=None, mask=None, clip_denoised=True, intermediate=None, intermediate_every=10,
-                       progress=False):
+                       x_init=None, mask=None, x_blend=None, clip_denoised=True, intermediate=None,
+                       intermediate_every=10, progress=False):
     """
     x0 ([N x 3 x H x W], [-1, 1]): 入力画像。ILVR の参照画像と、マスク合成の編集しない領域に使う。
+    x_blend: マスク合成の編集しない領域に使う画像 (省略すると x0)。加工した入力を x0 に渡し、マスクの外は
+        元の入力のままにしたいときに使う。
     t0: None なら純粋なノイズ x_T から (番号 T-1 から) 始める。整数 (1..T) なら SDEdit として
         q_sample(x_init, t0-1) から t0 ステップ回す。x_init は省略すると x0 (繰り返しの 2 回目以降に前回の出力を渡す)。
     resizers: (down, up) か None (ILVR を使わない)。
@@ -102,7 +104,8 @@ def sdedit_ilvr_sample(diffusion, model, x0, resizers=None, range_t=0, t_ref="t"
                     y = diffusion.q_sample(x0, t - 1, eps)
                 x = x - up(down(x)) + up(down(y))
             if mask is not None:
-                y_m = x0 if i == 0 else diffusion.q_sample(x0, t - 1, rng(shape))
+                xb = x0 if x_blend is None else x_blend
+                y_m = xb if i == 0 else diffusion.q_sample(xb, t - 1, rng(shape))
                 x = mask * x + (1 - mask) * y_m
         if intermediate is not None and (i % intermediate_every == 0 or i == start):
             intermediate.append((f"pred_x0_i{i:03d}", out["pred_xstart"].clone()))

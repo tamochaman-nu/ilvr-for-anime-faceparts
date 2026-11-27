@@ -19,6 +19,19 @@ bool のオプションは値を省略できる (--use_sdedit は --use_sdedit T
                        (scripts/ilvr_sample_eye.py の --mask_dir は「マスク付き ILVR」で、意味が違う)
   --use_color_fix      後処理: CIELAB の a*, b* の低周波 (sigma = --color_fix_sigma px) を入力のものに置き換える。
                        --use_mask と併用すると、補正の後に out = m*out + (1-m)*x0 をかけ直す (マスクの外は入力のまま)
+  入力の加工 (guided_diffusion/face_input_transform.py。加工した入力を SDEdit の開始点と ILVR の参照画像に使い、
+  マスク合成のマスクの外と色の補正には元の入力を使う。加工した入力は refs_cond/ に保存する):
+  --abstract_iters     双方向フィルタ (CIELAB) の回数 (0 で無効)。--abstract_sigma_s (px), --abstract_sigma_r (ΔE)
+  --quant_levels       L* の段階化の段数 (0 で無効)。--quant_sharpness
+  --xdog_strength      XDoG の輪郭線を描き足す濃さ (0 で無効)。--xdog_sigma
+  --stroke             均一な色の塗りの集まり (ストローク画) にする (none / generic / parts)。
+                       generic: SLIC の超画素 + 色の近い隣どうしの統合 (--stroke_segments, --stroke_compactness,
+                       --stroke_merge ΔE)。parts: 顔パーシングのラベル --stroke_parse_dir/<入力名>.png
+                       (scripts/parse_faces.py) の部位ごとの平均色。--stroke_shade_levels (2 以上で影の段)、
+                       --stroke_eye_scale_w / --stroke_eye_scale_h (目の領域を広げる倍率)、--stroke_eye_style
+                       (dark: 目を髪の色で塗る / iris: 白目・瞳 (--stroke_iris_rgb の一定の色)・上まぶたの線)
+  --color_transfer     前景の色をアニメ顔のデータの分布に写す (none / lab_meanstd / lab_meanstd_l / lab_quantile /
+                       lab_mean)。統計は --color_stats (scripts/fit_face_color_stats.py)、強さは --color_strength
   --seed               乱数のシード。既定では全ての入力で同じノイズ列を使う (視点が違っても同じノイズ)。
                        --seed_per_file True にすると scripts/ilvr_sample_eye.py と同じく、シードとファイル名から
                        入力ごとのシードを決める (ilvr_eye.sample_seed。回帰確認用)
@@ -57,6 +70,8 @@ from guided_diffusion.ilvr_eye import (  # noqa: E402
     sample_seed,
     save_png,
 )
+from guided_diffusion.face_input_transform import EYE_STYLES, STROKE_CHOICES, transform_input  # noqa: E402
+from guided_diffusion.ilvr_ref_transform import COLOR_TRANSFER_CHOICES, ColorTransfer  # noqa: E402
 from guided_diffusion.image_datasets import center_crop_arr  # noqa: E402
 from guided_diffusion.script_util import str2bool  # noqa: E402
 from guided_diffusion.sdedit import (  # noqa: E402
@@ -99,6 +114,23 @@ def option_tag(args, num_timesteps):
         parts.append("blendmask" + (f"f{args.mask_feather}" if args.mask_feather > 0 else ""))
     if args.use_color_fix:
         parts.append("cf" + (f"{args.color_fix_sigma:g}" if args.color_fix_sigma != 8.0 else ""))
+    if args.abstract_iters > 0:
+        parts.append(f"abs{args.abstract_iters}")
+    if args.stroke == "generic":
+        parts.append(f"stg{args.stroke_segments}m{args.stroke_merge:g}")
+    elif args.stroke == "parts":
+        e = (f"e{args.stroke_eye_scale_w:g}x{args.stroke_eye_scale_h:g}"
+             if (args.stroke_eye_scale_w, args.stroke_eye_scale_h) != (1.0, 1.0) else "")
+        if args.stroke_eye_style == "iris":
+            e += "iris" + "-".join(str(v) for v in args.stroke_iris_rgb)
+        parts.append(f"stp{args.stroke_shade_levels}{e}")
+    if args.quant_levels > 0:
+        parts.append(f"q{args.quant_levels}")
+    if args.xdog_strength > 0:
+        parts.append(f"xdog{args.xdog_strength:g}")
+    if args.color_transfer != "none":
+        parts.append(f"ct-{args.color_transfer.replace('lab_', '')}"
+                     + (f"{args.color_strength:g}" if args.color_strength != 1.0 else ""))
     return "_".join(parts)
 
 
@@ -140,6 +172,28 @@ def main():
     masks_all = None
     os.makedirs(os.path.join(args.out_dir, "samples"), exist_ok=True)
     os.makedirs(os.path.join(args.out_dir, "refs"), exist_ok=True)
+    ct = (ColorTransfer(args.color_stats, args.color_transfer, args.color_strength)
+          if args.color_transfer != "none" else None)
+    parse_all = None
+    if args.stroke == "parts":
+        assert args.stroke_parse_dir, "--stroke parts には --stroke_parse_dir が要る"
+        parse_all = th.stack([th.from_numpy(np.asarray(Image.open(os.path.join(args.stroke_parse_dir, s + ".png")),
+                                                       dtype=np.int64)) for s in stems])
+        assert tuple(parse_all.shape[1:]) == tuple(x0_all.shape[2:]), (parse_all.shape, x0_all.shape)
+    cond_all = transform_input(x0_all, abstract_iters=args.abstract_iters, abstract_sigma_s=args.abstract_sigma_s,
+                               abstract_sigma_r=args.abstract_sigma_r, quant_levels=args.quant_levels,
+                               quant_sharpness=args.quant_sharpness, xdog_strength=args.xdog_strength,
+                               xdog_sigma=args.xdog_sigma, color_transfer=ct, device=device,
+                               stroke=args.stroke, stroke_segments=args.stroke_segments,
+                               stroke_compactness=args.stroke_compactness, stroke_merge=args.stroke_merge,
+                               parse=parse_all, stroke_shade_levels=args.stroke_shade_levels,
+                               stroke_eye_scale_w=args.stroke_eye_scale_w, stroke_eye_scale_h=args.stroke_eye_scale_h,
+                               stroke_eye_style=args.stroke_eye_style, stroke_iris_rgb=args.stroke_iris_rgb)
+    has_cond = cond_all is not x0_all
+    if has_cond:
+        os.makedirs(os.path.join(args.out_dir, "refs_cond"), exist_ok=True)
+        for stem, c in zip(stems, cond_all):
+            save_png(c, os.path.join(args.out_dir, "refs_cond", f"{stem}.png"))
     for stem, x in zip(stems, x0_all):
         save_png(x, os.path.join(args.out_dir, "refs", f"{stem}.png"))
     if args.use_mask:
@@ -158,12 +212,15 @@ def main():
     for st in range(0, len(names), args.batch_size):
         idx = list(range(st, min(st + args.batch_size, len(names))))
         x0 = x0_all[idx].to(device)
+        c0 = cond_all[idx].to(device)
         mask = masks_all[idx].to(device) if masks_all is not None else None
         seeds = [sample_seed(args.seed, names[i]) if args.seed_per_file else args.seed for i in idx]
         rng = SampleRNG(seeds, device)
         inter = [] if args.save_intermediate else None
-        x = sdedit_repeat(diffusion, model, x0, repeats=args.sdedit_repeats, t0=t0, resizers=resizers,
-                          range_t=range_t, t_ref=args.t_ref, rng=rng, mask=mask, clip_denoised=args.clip_denoised,
+        # 加工した入力 (c0) を SDEdit の開始点と ILVR の参照画像に、元の入力 (x0) をマスク合成と色の補正に使う
+        x = sdedit_repeat(diffusion, model, c0, repeats=args.sdedit_repeats, t0=t0, resizers=resizers,
+                          range_t=range_t, t_ref=args.t_ref, rng=rng, mask=mask,
+                          x_blend=x0 if has_cond else None, clip_denoised=args.clip_denoised,
                           intermediate=inter, intermediate_every=args.intermediate_every, progress=args.progress)
         if args.use_color_fix:
             x = color_fix(x, x0, args.color_fix_sigma, mask=mask)
@@ -172,6 +229,8 @@ def main():
             save_png(x[j], os.path.join(args.out_dir, out))
             o = {"input": names[i], "ref_png": os.path.join("refs", f"{stems[i]}.png"), "sample": out,
                  "noise_seed": int(seeds[j])}
+            if has_cond:
+                o["cond_png"] = os.path.join("refs_cond", f"{stems[i]}.png")
             if inter is not None:
                 d = os.path.join("intermediate", f"{stems[i]}_{tag}_seed{args.seed}")
                 os.makedirs(os.path.join(args.out_dir, d), exist_ok=True)
@@ -193,6 +252,7 @@ def main():
                                "t0_sqrt_alpha" if args.t0_sqrt_alpha is not None else "t0_ratio"),
             "sdedit_start": start_info(diffusion, start) if t0 is not None else None,
             "start_index": start,
+            "input_transformed": has_cond,
             "use_ilvr_effective": use_ilvr,
             "range_t_effective": range_t if use_ilvr else None,
             "ilvr_applied_indices": [ilvr_steps[0], ilvr_steps[-1]] if ilvr_steps else None,
@@ -244,6 +304,28 @@ def create_argparser():
     # 色の補正
     flag("use_color_fix", False, "a*b* の低周波を入力に合わせる後処理")
     p.add_argument("--color_fix_sigma", type=float, default=8.0)
+    # 入力の加工 (guided_diffusion/face_input_transform.py)
+    p.add_argument("--abstract_iters", type=int, default=0, help="双方向フィルタの回数 (0 で無効)")
+    p.add_argument("--abstract_sigma_s", type=float, default=3.0)
+    p.add_argument("--abstract_sigma_r", type=float, default=8.0, help="色の差の sigma (CIELAB の ΔE)")
+    p.add_argument("--quant_levels", type=int, default=0, help="L* の段階化の段数 (0 で無効)")
+    p.add_argument("--quant_sharpness", type=float, default=3.0)
+    p.add_argument("--xdog_strength", type=float, default=0.0, help="XDoG の輪郭線の濃さ (0 で無効)")
+    p.add_argument("--xdog_sigma", type=float, default=1.0)
+    p.add_argument("--stroke", default="none", choices=STROKE_CHOICES, help="ストローク化 (none で無効)")
+    p.add_argument("--stroke_segments", type=int, default=200, help="generic: SLIC の超画素の数")
+    p.add_argument("--stroke_compactness", type=float, default=10.0, help="generic: SLIC の compactness")
+    p.add_argument("--stroke_merge", type=float, default=8.0, help="generic: 隣どうしをまとめる色の差 (ΔE)")
+    p.add_argument("--stroke_parse_dir", default=None, help="parts: パーシングのラベル (scripts/parse_faces.py)")
+    p.add_argument("--stroke_shade_levels", type=int, default=1, help="parts: 肌・首・髪・服の影の段数")
+    p.add_argument("--stroke_eye_scale_w", type=float, default=1.0, help="parts: 目の領域の横の倍率")
+    p.add_argument("--stroke_eye_scale_h", type=float, default=1.0, help="parts: 目の領域の縦の倍率")
+    p.add_argument("--stroke_eye_style", default="dark", choices=EYE_STYLES, help="parts: 目の塗り方")
+    p.add_argument("--stroke_iris_rgb", type=lambda v: tuple(int(c) for c in v.split(",")), default=(90, 60, 50),
+                   help="parts + iris: 瞳の色 (R,G,B)")
+    p.add_argument("--color_transfer", default="none", choices=COLOR_TRANSFER_CHOICES)
+    p.add_argument("--color_stats", default="lists/face_color_stats.json")
+    p.add_argument("--color_strength", type=float, default=1.0)
     # 乱数・その他
     p.add_argument("--seed", type=int, default=0)
     flag("seed_per_file", False, "入力ごとにシードを変える (scripts/ilvr_sample_eye.py と同じ乱数)")
